@@ -122,9 +122,11 @@
     margin-top:6px;
   }
   .count.pulse{animation:pop .5s ease}
+  .count.tick{animation:tick .35s ease}
   @keyframes pop{0%{transform:scale(1)}40%{transform:scale(1.07)}100%{transform:scale(1)}}
+  @keyframes tick{0%{transform:scale(1);opacity:.75}30%{transform:scale(1.04);opacity:1}100%{transform:scale(1);opacity:1}}
   @media (prefers-reduced-motion:reduce){
-    .count.pulse{animation:none}
+    .count.pulse,.count.tick{animation:none}
     .stage{transition:none}
   }
   .bar{height:5px;background:color-mix(in srgb,currentColor 24%,transparent);width:100%;margin-top:14px;border-radius:99px;overflow:hidden}
@@ -216,17 +218,25 @@
         <button data-v="3" aria-pressed="true">3回</button>
       </div>
     </div>
+    <div class="row">
+      <span>音</span>
+      <div class="seg" id="segSnd">
+        <button data-v="1" aria-pressed="true">オン</button>
+        <button data-v="0">オフ</button>
+      </div>
+    </div>
   </div>
 
   <footer>
-    右 → <b>足の入れ替え5秒</b> → 左 を1セット。セット間は<b>15秒</b>休みます。<br>
-    切り替わりは音でも知らせるので、画面を見ていなくて大丈夫です。
+    右 → <b>足の入れ替え5秒</b> → 左 を1セット。セット間も<b>5秒</b>で次へ。<br>
+    開始と切り替わりは<b>チャイム</b>、<b>残り5秒</b>からはカウント音。画面を見ていなくて大丈夫です。
   </footer>
 </div>
 
 <script>
 (function(){
-  var SEC = 30, SETS = 3, SWITCH = 5, REST = 15, PREP = 5;
+  var SEC = 30, SETS = 3, SWITCH = 5, REST = 5, PREP = 5;
+  var LEAD = 5;   // 残り何秒からカウント音を鳴らすか
 
   var panel=document.getElementById('panel'), phaseEl=document.getElementById('phase'),
       sideEl=document.getElementById('side'), subEl=document.getElementById('sideSub'),
@@ -234,7 +244,8 @@
       dots=document.getElementById('dots'), totalEl=document.getElementById('total'),
       go=document.getElementById('go'), reset=document.getElementById('reset');
 
-  var plan=[], idx=0, left=0, running=false, tick=null, wake=null, ac=null;
+  var plan=[], idx=0, left=0, running=false, tick=null, deadline=0, wake=null;
+  var ac=null, master=null, sound=true;
 
   function build(){
     plan=[{k:'prep',t:PREP}];
@@ -262,18 +273,19 @@
   function render(pulse){
     var p=plan[idx];
     panel.className='panel ' + (p.k==='right'?'side-right':p.k==='left'?'side-left':'side-rest');
-    var label={prep:'準備してください',right:'伸ばす',left:'伸ばす',switch:'足を入れ替える',rest:'ひと休み',done:'おつかれさまでした'}[p.k];
+    var label={prep:'準備してください',right:'伸ばす',left:'伸ばす',switch:'足を入れ替える',rest:'足を入れ替える',done:'おつかれさまでした'}[p.k];
     phaseEl.textContent = p.set ? label+'　'+p.set+'/'+SETS+'セット目' : label;
 
     if(p.k==='right'){ sideEl.firstChild.nodeValue='右'; subEl.textContent='みぎ足'; }
     else if(p.k==='left'){ sideEl.firstChild.nodeValue='左'; subEl.textContent='ひだり足'; }
     else if(p.k==='switch'){ sideEl.firstChild.nodeValue='交代'; subEl.textContent='右 → 左'; }
-    else if(p.k==='rest'){ sideEl.firstChild.nodeValue='休'; subEl.textContent='つぎのセットへ'; }
+    else if(p.k==='rest'){ sideEl.firstChild.nodeValue='交代'; subEl.textContent='左 → 右'; }
     else if(p.k==='done'){ sideEl.firstChild.nodeValue='完'; subEl.textContent=SETS+'セット終了'; }
     else { sideEl.firstChild.nodeValue='右'; subEl.textContent='みぎ足から'; }
 
     countEl.textContent = p.k==='done' ? '✓' : left;
-    if(pulse){ countEl.classList.remove('pulse'); void countEl.offsetWidth; countEl.classList.add('pulse'); }
+    countEl.classList.remove('pulse','tick');
+    if(pulse){ void countEl.offsetWidth; countEl.classList.add(pulse==='tick'?'tick':'pulse'); }
     fill.style.width = p.t ? ((p.t-left)/p.t*100)+'%' : '100%';
     totalEl.textContent = mmss(remaining());
 
@@ -287,46 +299,93 @@
     go.textContent = p.k==='done' ? 'もう一度' : (running?'一時停止':(idx===0&&left===PREP?'開始':'再開'));
   }
 
-  function beep(freq,dur,vol){
+  /* ---- 音 ----
+     AudioContext はユーザー操作の中で作る／再開する（iOS対策）。*/
+  function audio(){
     try{
-      if(!ac) ac=new (window.AudioContext||window.webkitAudioContext)();
-      var o=ac.createOscillator(), g=ac.createGain();
-      o.type='sine'; o.frequency.value=freq;
-      g.gain.setValueAtTime(vol||0.16, ac.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime+dur);
-      o.connect(g); g.connect(ac.destination);
-      o.start(); o.stop(ac.currentTime+dur);
+      if(!ac){
+        var AC=window.AudioContext||window.webkitAudioContext;
+        if(!AC) return null;
+        ac=new AC();
+        master=ac.createGain();
+        master.gain.value=0.9;
+        master.connect(ac.destination);
+      }
+      if(ac.state==='suspended') ac.resume().catch(function(){});
+      return ac;
+    }catch(e){ return null; }
+  }
+
+  // 単音。立ち上がりを短く、減衰を長めにとる
+  function tone(freq,dur,vol,delay,type){
+    var a=sound?audio():null; if(!a) return;
+    try{
+      var t0=a.currentTime+(delay||0);
+      var o=a.createOscillator(), g=a.createGain();
+      o.type=type||'sine';
+      o.frequency.setValueAtTime(freq,t0);
+      g.gain.setValueAtTime(0.0001,t0);
+      g.gain.exponentialRampToValueAtTime(vol,t0+0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001,t0+dur);
+      o.connect(g); g.connect(master);
+      o.start(t0); o.stop(t0+dur+0.03);
     }catch(e){}
+  }
+  // 基音に倍音を重ねて鐘のような「ポーン」にする
+  function bell(freq,dur,vol,delay){
+    vol=vol||0.22;
+    tone(freq,dur,vol,delay,'sine');
+    tone(freq*2.02,dur*0.55,vol*0.32,delay,'sine');
+    tone(freq*3.01,dur*0.30,vol*0.12,delay,'sine');
   }
   function buzz(ms){ try{ if(navigator.vibrate) navigator.vibrate(ms); }catch(e){} }
 
-  function cue(kind){
-    if(kind==='right'||kind==='left'){ beep(880,.22); buzz(180); }
-    else if(kind==='switch'){ beep(560,.18); buzz(90); }
-    else if(kind==='rest'){ beep(440,.20); buzz(90); }
-    else if(kind==='done'){ beep(880,.16); setTimeout(function(){beep(1100,.16);},180); setTimeout(function(){beep(1320,.34);},360); buzz([160,80,160,80,260]); }
+  var TICK_HZ=[0,988,932,880,831,784];   // 残り1〜5秒。0に近いほど高い音
+  function countTick(n){
+    tone(TICK_HZ[n]||784,0.09,0.12,0,'triangle');
+    if(n<=3) buzz(40);
   }
 
-  function step(){
+  function cue(kind){
+    if(kind==='right'||kind==='left'){ bell(880,0.80,0.24); buzz(180); }
+    else if(kind==='switch'||kind==='rest'){ bell(587,0.45,0.20); bell(784,0.60,0.20,0.14); buzz([90,60,90]); }
+    else if(kind==='done'){ bell(784,0.50,0.24); bell(988,0.50,0.24,0.16); bell(1175,1.10,0.26,0.32); buzz([160,80,160,80,260]); }
+  }
+  function startCue(){ bell(659,0.45,0.22); bell(988,0.90,0.24,0.15); buzz(80); }  // ピ・ポーン
+
+  /* ---- 進行 ---- */
+  function step(quiet){
+    var kind = plan[idx].k;
     left--;
-    if(left<=3 && left>0 && plan[idx].k!=='done') beep(660,.07,.09);
     if(left<=0){
       idx++;
-      if(idx>=plan.length-1){ idx=plan.length-1; left=0; stop(); cue('done'); render(true); return; }
+      if(idx>=plan.length-1){ idx=plan.length-1; left=0; stop(); if(!quiet) cue('done'); render(true); return; }
       left=plan[idx].t;
-      cue(plan[idx].k);
+      if(!quiet) cue(plan[idx].k);
       render(true);
       return;
     }
+    if(left<=LEAD && kind!=='done'){ if(!quiet) countTick(left); render('tick'); return; }
     render();
   }
 
+  // 秒の刻みは実時間に合わせる（setInterval のずれ・バックグラウンドでの間引き対策）
+  function pump(){
+    if(!running) return;
+    var n=0;
+    while(Date.now()>=deadline && n<3600){ deadline+=1000; n++; }
+    // 間引かれて何秒分もまとめて進むときは、最後の1回だけ音を出す
+    for(var i=0;i<n && running;i++) step(i<n-1);
+  }
+
   function start(){
+    audio();                       // ユーザー操作の中で音を起こしておく
     if(plan[idx].k==='done'){ build(); }
     running=true;
-    beep(700,.12);
+    startCue();
     if(tick) clearInterval(tick);
-    tick=setInterval(step,1000);
+    deadline=Date.now()+1000;
+    tick=setInterval(pump,100);
     lock();
     render();
   }
@@ -343,7 +402,7 @@
   function unlock(){ try{ if(wake){ wake.release(); wake=null; } }catch(e){} }
 
   go.addEventListener('click',function(){ running?stop():start(); });
-  reset.addEventListener('click',function(){ stop(); build(); });
+  reset.addEventListener('click',function(){ audio(); stop(); build(); });
 
   function seg(el,cb){
     el.addEventListener('click',function(e){
@@ -354,19 +413,33 @@
   }
   seg(document.getElementById('segSec'),function(v){ SEC=v; stop(); build(); save(); });
   seg(document.getElementById('segSet'),function(v){ SETS=v; stop(); build(); save(); });
+  seg(document.getElementById('segSnd'),function(v){
+    sound=!!v;
+    if(sound){ audio(); bell(880,0.5,0.22); }   // オンにしたら試し鳴らし
+    save();
+  });
 
-  function save(){ try{ localStorage.setItem('quadTimer',JSON.stringify({SEC:SEC,SETS:SETS})); }catch(e){} }
+  function save(){ try{ localStorage.setItem('quadTimer',JSON.stringify({SEC:SEC,SETS:SETS,SND:sound?1:0})); }catch(e){} }
   function load(){
     try{
       var o=JSON.parse(localStorage.getItem('quadTimer')||'null');
-      if(o&&o.SEC){ SEC=o.SEC; SETS=o.SETS;
+      if(!o) return;
+      if(o.SEC){ SEC=o.SEC; SETS=o.SETS;
         [].forEach.call(document.querySelectorAll('#segSec button'),function(b){b.setAttribute('aria-pressed',+b.dataset.v===SEC?'true':'false');});
         [].forEach.call(document.querySelectorAll('#segSet button'),function(b){b.setAttribute('aria-pressed',+b.dataset.v===SETS?'true':'false');});
+      }
+      if(o.SND!==undefined){ sound=!!o.SND;
+        [].forEach.call(document.querySelectorAll('#segSnd button'),function(b){b.setAttribute('aria-pressed',(+b.dataset.v===1)===sound?'true':'false');});
       }
     }catch(e){}
   }
 
-  document.addEventListener('visibilitychange',function(){ if(!document.hidden && running) lock(); });
+  document.addEventListener('visibilitychange',function(){
+    if(document.hidden || !running) return;
+    lock();
+    if(ac && ac.state==='suspended') ac.resume().catch(function(){});
+    pump();                        // 戻ってきたら実時間に追いつく
+  });
 
   load(); build();
 })();
