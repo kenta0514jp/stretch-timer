@@ -340,10 +340,10 @@
         if(!AC) return null;
         ac=new AC();
         master=ac.createGain();
+        // コンプレッサーは通さない。立ち上がりを潰して芯がなくなるため。
+        // 音が重なっても振幅は 0.5 程度までなので歪まない
         master.gain.value=0.9;
-        // 複数の音が重なっても歪まないように
-        var comp=ac.createDynamicsCompressor();
-        master.connect(comp); comp.connect(ac.destination);
+        master.connect(ac.destination);
       }
       if(ac.state==='suspended') ac.resume().catch(function(){});
       return ac;
@@ -366,42 +366,52 @@
       : '音の準備ができました');
   }
 
-  // 単音。立ち上がりを短く、減衰を長めにとる
-  function tone(freq,dur,vol,delay,type){
+  // 単音。立ち上がり → 音量を保つ（ここが音の芯）→ 減衰
+  function tone(freq,dur,vol,delay,type,hold){
     var a=sound?audio():null; if(!a) return;
     try{
-      var t0=a.currentTime+(delay||0);
+      var t0=a.currentTime+(delay||0), atk=0.006;
       var o=a.createOscillator(), g=a.createGain();
       o.type=type||'sine';
-      o.frequency.setValueAtTime(freq,t0);
+      o.frequency.setValueAtTime(freq,t0);   // 周波数は動かさない
       g.gain.setValueAtTime(0.0001,t0);
-      g.gain.exponentialRampToValueAtTime(vol,t0+0.012);
+      g.gain.exponentialRampToValueAtTime(vol,t0+atk);
+      g.gain.setValueAtTime(vol,t0+atk+(hold||0));
       g.gain.exponentialRampToValueAtTime(0.0001,t0+dur);
       o.connect(g); g.connect(master);
       o.start(t0); o.stop(t0+dur+0.03);
     }catch(e){}
   }
-  // 基音に倍音を重ねて鐘のような「ポーン」にする
-  function bell(freq,dur,vol,delay){
-    vol=vol||0.22;
-    tone(freq,dur,vol,delay,'sine');
-    tone(freq*2.02,dur*0.55,vol*0.32,delay,'sine');
-    tone(freq*3.01,dur*0.30,vol*0.12,delay,'sine');
+  // 倍音は厳密な整数倍。整数からずらすと鐘のように音程がぼやけて聞こえる
+  function chime(freq,dur,vol,delay){
+    vol=vol||0.24;
+    tone(freq,dur,vol,delay,'triangle',Math.min(0.14,dur*0.4));
+    tone(freq*2,dur*0.55,vol*0.20,delay,'sine',0);
+    tone(freq*3,dur*0.30,vol*0.07,delay,'sine',0);
+  }
+  // 時報のような短いピッ
+  function pip(freq,vol){
+    vol=vol||0.20;
+    tone(freq,0.13,vol,0,'triangle',0.05);
+    tone(freq*2,0.09,vol*0.16,0,'sine',0);
   }
   function buzz(ms){ try{ if(navigator.vibrate) navigator.vibrate(ms); }catch(e){} }
 
-  var TICK_HZ=[0,988,932,880,831,784];   // 残り1〜5秒。0に近いほど高い音
+  // 平均律のCメジャー。半音を使わないので音程が素直に聞こえる
+  var C5=523.25, E5=659.25, G5=784.00, A5=880.00, C6=1046.50;
+
+  // 残り5〜1秒は同じ高さで5回。時報と同じ考え方で、上がり下がりさせない
   function countTick(n){
-    tone(TICK_HZ[n]||784,0.09,0.12,0,'triangle');
+    pip(A5);
     if(n<=3) buzz(40);
   }
 
   function cue(kind){
-    if(kind==='right'||kind==='left'){ bell(880,0.80,0.24); buzz(180); }
-    else if(kind==='switch'||kind==='rest'){ bell(587,0.45,0.20); bell(784,0.60,0.20,0.14); buzz([90,60,90]); }
-    else if(kind==='done'){ bell(784,0.50,0.24); bell(988,0.50,0.24,0.16); bell(1175,1.10,0.26,0.32); buzz([160,80,160,80,260]); }
+    if(kind==='right'||kind==='left'){ chime(C6,0.90,0.26); buzz(180); }                          // ポーン（1オクターブ上で区切る）
+    else if(kind==='switch'||kind==='rest'){ chime(G5,0.35,0.22); chime(E5,0.65,0.22,0.16); buzz([90,60,90]); }  // ソ→ミ
+    else if(kind==='done'){ chime(C5,0.30,0.24); chime(E5,0.30,0.24,0.16); chime(G5,0.30,0.24,0.32); chime(C6,1.20,0.26,0.48); buzz([160,80,160,80,260]); }  // ド・ミ・ソ・ド
   }
-  function startCue(){ bell(659,0.45,0.22); bell(988,0.90,0.24,0.15); buzz(80); }  // ピ・ポーン
+  function startCue(){ chime(G5,0.35,0.24); chime(C6,0.90,0.26,0.16); buzz(80); }   // ソ→ド（完全4度）のピ・ポーン
 
   /* ---- 進行 ---- */
   function step(quiet){
@@ -466,7 +476,7 @@
   seg(document.getElementById('segSet'),function(v){ SETS=v; stop(); build(); save(); });
   seg(document.getElementById('segSnd'),function(v){
     sound=!!v;
-    if(sound){ audio(); bell(880,0.5,0.22); }   // オンにしたら試し鳴らし
+    if(sound){ audio(); chime(A5,0.6,0.24); }   // オンにしたら試し鳴らし
     setTimeout(function(){ sndStatus(sound); },60);
     save();
   });
