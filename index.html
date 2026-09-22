@@ -171,6 +171,11 @@
   .seg button + button{border-left:1px solid var(--line)}
   .seg button[aria-pressed="true"]{background:var(--ink);color:var(--bg)}
 
+  .check{justify-content:flex-start;gap:10px}
+  .mini{background:transparent;color:var(--ink-2);padding:8px 14px;font-size:13px}
+  .note{font-size:12px;line-height:1.5;color:var(--ink-3);flex:1;min-width:180px}
+  .note.warn{color:var(--right)}
+
   footer{color:var(--ink-3);font-size:12px;line-height:1.7}
   footer b{color:var(--ink-2)}
 </style>
@@ -225,6 +230,10 @@
         <button data-v="0">オフ</button>
       </div>
     </div>
+    <div class="row check">
+      <button class="ghost mini" id="test">音を確認</button>
+      <span class="note" id="sndNote" aria-live="polite"></span>
+    </div>
   </div>
 
   <footer>
@@ -242,10 +251,13 @@
       sideEl=document.getElementById('side'), subEl=document.getElementById('sideSub'),
       countEl=document.getElementById('count'), fill=document.getElementById('fill'),
       dots=document.getElementById('dots'), totalEl=document.getElementById('total'),
-      go=document.getElementById('go'), reset=document.getElementById('reset');
+      go=document.getElementById('go'), reset=document.getElementById('reset'),
+      testBtn=document.getElementById('test'), noteEl=document.getElementById('sndNote');
 
   var plan=[], idx=0, left=0, running=false, tick=null, deadline=0, wake=null;
-  var ac=null, master=null, sound=true;
+  var ac=null, master=null, sound=true, silent=null;
+  var iOS=/iP(hone|ad|od)/.test(navigator.platform||'') ||
+          (navigator.maxTouchPoints>1 && /Mac/.test(navigator.platform||''));
 
   function build(){
     plan=[{k:'prep',t:PREP}];
@@ -300,20 +312,58 @@
   }
 
   /* ---- 音 ----
-     AudioContext はユーザー操作の中で作る／再開する（iOS対策）。*/
+     AudioContext はユーザー操作の中で作る／再開する。
+     iOS の消音（マナーモード）スイッチは Web Audio も止めてしまうので、
+     Audio Session API で playback を宣言し、無音の <audio> も一度再生して
+     オーディオセッションを起こしておく。*/
+  var SILENT='data:audio/wav;base64,UklGRuwAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YcgAAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgA==';
+
+  function unlockMedia(){
+    try{
+      if(!silent){
+        silent=new Audio(SILENT);
+        silent.setAttribute('playsinline','');
+        silent.volume=0.01;
+      }
+      var pr=silent.play();
+      if(pr && pr.catch) pr.catch(function(){});
+    }catch(e){}
+  }
+
   function audio(){
     try{
+      // Safari 16.4+ / iOS 16.4+。消音スイッチに邪魔されないようにする
+      try{ if(navigator.audioSession) navigator.audioSession.type='playback'; }catch(e){}
+      unlockMedia();
       if(!ac){
         var AC=window.AudioContext||window.webkitAudioContext;
         if(!AC) return null;
         ac=new AC();
         master=ac.createGain();
         master.gain.value=0.9;
-        master.connect(ac.destination);
+        // 複数の音が重なっても歪まないように
+        var comp=ac.createDynamicsCompressor();
+        master.connect(comp); comp.connect(ac.destination);
       }
       if(ac.state==='suspended') ac.resume().catch(function(){});
       return ac;
     }catch(e){ return null; }
+  }
+
+  // 鳴らせる状態かどうかを画面に出す（鳴らない原因が分かるように）
+  function note(msg,warn){
+    noteEl.textContent=msg;
+    noteEl.className='note'+(warn?' warn':'');
+  }
+  function sndStatus(tested){
+    if(!sound){ note('音はオフです'); return; }
+    if(!(window.AudioContext||window.webkitAudioContext)){ note('このブラウザは音を出せません',true); return; }
+    if(!ac){ note('「開始」か「音を確認」を押すと鳴ります'); return; }
+    if(ac.state!=='running'){ note('ブラウザが音を止めています。もう一度押してください',true); return; }
+    note(tested
+      ? (iOS ? '鳴らしました。聞こえないときは本体横のマナーモードスイッチと音量を確認してください'
+             : '鳴らしました。聞こえないときは端末とブラウザの音量を確認してください')
+      : '音の準備ができました');
   }
 
   // 単音。立ち上がりを短く、減衰を長めにとる
@@ -380,6 +430,7 @@
 
   function start(){
     audio();                       // ユーザー操作の中で音を起こしておく
+    sndStatus();
     if(plan[idx].k==='done'){ build(); }
     running=true;
     startCue();
@@ -416,7 +467,20 @@
   seg(document.getElementById('segSnd'),function(v){
     sound=!!v;
     if(sound){ audio(); bell(880,0.5,0.22); }   // オンにしたら試し鳴らし
+    setTimeout(function(){ sndStatus(sound); },60);
     save();
+  });
+
+  testBtn.addEventListener('click',function(){
+    if(!sound){ note('音がオフです。「オン」にしてください',true); return; }
+    audio();
+    startCue();
+    setTimeout(function(){ sndStatus(true); },60);
+  });
+
+  // 最初のタップ／クリックで音を起こしておく（自動再生の制限対策）
+  ['pointerdown','touchend','keydown'].forEach(function(ev){
+    document.addEventListener(ev,function once(){ audio(); sndStatus(); },{once:true,passive:true});
   });
 
   function save(){ try{ localStorage.setItem('quadTimer',JSON.stringify({SEC:SEC,SETS:SETS,SND:sound?1:0})); }catch(e){} }
@@ -437,11 +501,11 @@
   document.addEventListener('visibilitychange',function(){
     if(document.hidden || !running) return;
     lock();
-    if(ac && ac.state==='suspended') ac.resume().catch(function(){});
+    if(ac && ac.state==='suspended') ac.resume().catch(function(){ sndStatus(); });
     pump();                        // 戻ってきたら実時間に追いつく
   });
 
-  load(); build();
+  load(); build(); sndStatus();
 })();
 </script>
 </body>
